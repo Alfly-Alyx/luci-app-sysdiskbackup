@@ -1,0 +1,359 @@
+msgid ""
+msgstr ""
+"Language: fr\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Plural-Forms: nplurals=2; plural=(n > 1);\n"
+
+msgid "System image"
+msgstr "Image système"
+
+msgid "System image backup"
+msgstr "Sauvegarde de l’image système"
+
+msgid "Create image"
+msgstr "Créer l’image"
+
+msgid "Create system image"
+msgstr "Créer l’image système"
+
+msgid "USB destination"
+msgstr "Destination USB"
+
+msgid "USB device"
+msgstr "Périphérique USB"
+
+msgid "USB ready"
+msgstr "USB prêt"
+
+msgid "Source"
+msgstr "Source"
+
+msgid "Backup status"
+msgstr "État de la sauvegarde"
+
+msgid "Elapsed time"
+msgstr "Temps écoulé"
+
+msgid "Estimated time remaining"
+msgstr "Temps restant estimé"
+
+msgid "Data write speed"
+msgstr "Débit d’écriture des données"
+
+msgid "Calculating…"
+msgstr "Calcul…"
+
+msgid "Preparing the system image"
+msgstr "Préparation de l’image système"
+
+msgid "Copying the system disk"
+msgstr "Copie du disque système"
+
+msgid "Relocating the backup GPT header"
+msgstr "Repositionnement de l’en-tête GPT de secours"
+
+msgid "Calculating the SHA-256 checksum"
+msgstr "Calcul de la somme de contrôle SHA-256"
+
+msgid "Finalizing the image"
+msgstr "Finalisation de l’image"
+
+msgid "System image completed successfully"
+msgstr "Image système terminée avec succès"
+
+msgid "Backup cancelled"
+msgstr "Sauvegarde annulée"
+
+msgid "Backup failed"
+msgstr "Échec de la sauvegarde"
+
+msgid "The previous backup process is no longer running"
+msgstr "Le processus de sauvegarde précédent n’est plus en cours d’exécution"
+
+msgid "Cancel"
+msgstr "Annuler"
+
+msgid "Idle"
+msgstr "Inactif"
+
+msgid "USB destination:"
+msgstr "Destination USB :"
+
+msgid "Source disk:"
+msgstr "Disque source :"
+
+msgid "Automatically detected"
+msgstr "Détecté automatiquement"
+
+msgid "Automatic detection failed"
+msgstr "Échec de la détection automatique"
+
+msgid "Manual source disk"
+msgstr "Disque source manuel"
+
+msgid "Enter or select a source disk."
+msgstr "Saisissez ou sélectionnez un disque source."
+
+msgid "No compatible physical disk was enumerated automatically. Enter the whole disk name, for example mmcblk0 or nvme0n1."
+msgstr "Aucun disque physique compatible n’a été énuméré automatiquement. Saisissez le nom du disque entier, par exemple mmcblk0 ou nvme0n1."
+
+msgid "Manual source selection is active. Verify the disk carefully; the package cannot prove that it contains the running system."
+msgstr "La sélection manuelle de la source est active. Vérifiez soigneusement le disque ; le paquet ne peut pas prouver qu’il contient le système en cours d’exécution."
+
+msgid "Use manual selection only when you know which whole disk contains the boot sectors and the running OpenWrt installation."
+msgstr "Utilisez la sélection manuelle uniquement si vous savez quel disque entier contient les secteurs d’amorçage et l’installation OpenWrt active."
+
+msgid "Unable to start the backup"
+msgstr "Impossible de démarrer la sauvegarde"
+
+msgid "Unable to cancel the backup"
+msgstr "Impossible d’annuler la sauvegarde"
+
+msgid "The active system disk could not be identified safely."
+msgstr "Le disque système actif n’a pas pu être identifié de manière sûre."
+
+msgid "SHA-256:"
+msgstr "SHA-256 :"
+
+msgid "%dh %dm %ds"
+msgstr "%dh %dmin %ds"
+
+msgid "%dm %ds"
+msgstr "%dmin %ds"
+
+msgid "%ds"
+msgstr "%ds"
+
+msgid "%s/s"
+msgstr "%s/s"
+
+msgid "B"
+msgstr "o"
+
+msgid "KiB"
+msgstr "Kio"
+
+msgid "MiB"
+msgstr "Mio"
+
+msgid "GiB"
+msgstr "Gio"
+
+msgid "TiB"
+msgstr "Tio"
+
+msgid "Unable to map /rom, /overlay or / to a supported physical block disk"
+msgstr "Impossible d’associer /rom, /overlay ou / à un disque physique pris en charge"
+
+msgid "The active FIT system is stored on NAND/UBI and cannot be cloned as a portable raw disk image"
+msgstr "Le système FIT actif se trouve sur NAND/UBI et ne peut pas être cloné sous forme d’image disque brute portable"
+
+msgid "The selected source is not a supported physical block disk"
+msgstr "La source sélectionnée n’est pas un disque physique pris en charge"
+
+msgid "The selected source must be a whole physical disk"
+msgstr "La source sélectionnée doit être un disque physique entier"
+
+msgid "The selected source disk is unavailable"
+msgstr "Le disque source sélectionné est indisponible"
+
+msgid "The selected eMMC service area is not a restorable system disk"
+msgstr "La zone de service eMMC sélectionnée n’est pas un disque système restaurable"
+
+msgid "Invalid source disk identifier"
+msgstr "Identifiant de disque source non valide"
+
+msgid "FAT32 split image: reassemble the parts before flashing"
+msgstr "Image FAT32 segmentée : réassemblez les morceaux avant l’écriture"
+
+msgid "This FAT32 destination will receive split image files. Reassemble them on an NTFS, exFAT, ext4 or other large-file filesystem before using Balena Etcher or Rufus. No pre-existing file on the USB device will be deleted or overwritten."
+msgstr "Cette destination FAT32 recevra une image découpée en plusieurs fichiers. Réassemblez-les sur un système NTFS, exFAT, ext4 ou acceptant les gros fichiers avant d’utiliser Balena Etcher ou Rufus. Aucun fichier déjà présent sur la clé USB ne sera supprimé ni écrasé."
+
+msgid "Automatic detection (recommended): %s"
+msgstr "Détection automatique (recommandée) : %s"
+
+msgid "Force"
+msgstr "Forcer"
+
+msgid "Source mode"
+msgstr "Mode de sélection de la source"
+
+msgid "Automatic detection is recommended. Force a whole source disk only when you have verified it independently."
+msgstr "La détection automatique est recommandée. Ne forcez un disque source entier qu’après l’avoir vérifié indépendamment."
+
+msgid "FAT32 split files"
+msgstr "Fichiers FAT32 segmentés"
+
+msgid "USB ready — split FAT32"
+msgstr "USB prêt — FAT32 segmenté"
+
+msgid "FAT32 split backup: %d parts. Reassemble them before flashing."
+msgstr "Sauvegarde FAT32 segmentée : %d morceaux. Réassemblez-les avant l’écriture."
+
+msgid "Windows merge script:"
+msgstr "Script de réassemblage Windows :"
+
+msgid "Linux/macOS merge script:"
+msgstr "Script de réassemblage Linux/macOS :"
+
+msgid "The image would require too many FAT32 parts"
+msgstr "L’image nécessiterait trop de morceaux FAT32"
+
+msgid "A backup file with the generated name already exists"
+msgstr "Un fichier de sauvegarde portant le nom généré existe déjà"
+
+msgid "Unable to finalize the image parts"
+msgstr "Impossible de finaliser les morceaux de l’image"
+
+msgid "The image parts are complete, but the checksum file could not be written"
+msgstr "Les morceaux de l’image sont terminés, mais le fichier de somme de contrôle n’a pas pu être écrit"
+
+msgid "The image parts are complete, but the Windows merge script could not be written"
+msgstr "Les morceaux de l’image sont terminés, mais le script de réassemblage Windows n’a pas pu être écrit"
+
+msgid "The image parts are complete, but the Linux merge script could not be written"
+msgstr "Les morceaux de l’image sont terminés, mais le script de réassemblage Linux n’a pas pu être écrit"
+
+msgid "The image parts are complete, but the restore instructions could not be written"
+msgstr "Les morceaux de l’image sont terminés, mais les instructions de restauration n’ont pas pu être écrites"
+
+msgid "The active system spans multiple physical disks; a single raw image would be incomplete"
+msgstr "Le système actif s’étend sur plusieurs disques physiques ; une image brute unique serait incomplète"
+
+msgid "Unable to read the system disk size"
+msgstr "Impossible de lire la taille du disque système"
+
+msgid "Unable to read the system disk logical sector size"
+msgstr "Impossible de lire la taille des secteurs logiques du disque système"
+
+msgid "Only disks with 512-byte logical sectors can be imaged portably"
+msgstr "Seuls les disques à secteurs logiques de 512 octets peuvent produire une image portable"
+
+msgid "Invalid destination identifier"
+msgstr "Identifiant de destination non valide"
+
+msgid "A backup is already running"
+msgstr "Une sauvegarde est déjà en cours"
+
+msgid "The selected destination is not a mounted USB filesystem"
+msgstr "La destination sélectionnée n’est pas un système de fichiers USB monté"
+
+msgid "No backup is running"
+msgstr "Aucune sauvegarde n’est en cours"
+
+msgid "Unable to stop the backup"
+msgstr "Impossible d’arrêter la sauvegarde"
+
+msgid "The USB destination disappeared or was remounted"
+msgstr "La destination USB a disparu ou a été remontée"
+
+msgid "Backup cancelled by the user"
+msgstr "Sauvegarde annulée par l’utilisateur"
+
+msgid "A read or write error interrupted the disk copy"
+msgstr "Une erreur de lecture ou d’écriture a interrompu la copie du disque"
+
+msgid "The generated image is shorter than expected"
+msgstr "L’image générée est plus courte que prévu"
+
+msgid "Unable to repair the GPT copy"
+msgstr "Impossible de réparer la copie GPT"
+
+msgid "Unable to calculate the image checksum"
+msgstr "Impossible de calculer la somme de contrôle de l’image"
+
+msgid "Unable to finalize the image file"
+msgstr "Impossible de finaliser le fichier image"
+
+msgid "The image is complete, but its checksum file could not be written"
+msgstr "L’image est complète, mais son fichier de somme de contrôle n’a pas pu être écrit"
+
+msgid "Detected system disk"
+msgstr "Disque système détecté"
+
+msgid "Physical disk size"
+msgstr "Taille du disque physique"
+
+msgid "Image size"
+msgstr "Taille de l’image"
+
+msgid "Last included partition"
+msgstr "Dernière partition incluse"
+
+msgid "Partition table"
+msgstr "Table de partitions"
+
+msgid "Image destination"
+msgstr "Destination de l’image"
+
+msgid "Mount point"
+msgstr "Point de montage"
+
+msgid "Filesystem"
+msgstr "Système de fichiers"
+
+msgid "Free / total"
+msgstr "Libre / total"
+
+msgid "Status"
+msgstr "État"
+
+msgid "Unsuitable"
+msgstr "Inadapté"
+
+msgid "Not mounted"
+msgstr "Non monté"
+
+msgid "Unavailable"
+msgstr "Indisponible"
+
+msgid "Not enough free space for the image"
+msgstr "Espace libre insuffisant pour l’image"
+
+msgid "FAT32 cannot store an image of 4 GiB or more"
+msgstr "FAT32 ne peut pas stocker une image de 4 Gio ou plus"
+
+msgid "The USB filesystem is not mounted read-write"
+msgstr "Le système de fichiers USB n’est pas monté en lecture-écriture"
+
+msgid "No usable filesystem was recognized on this block device"
+msgstr "Aucun système de fichiers utilisable n’a été reconnu sur ce périphérique"
+
+msgid "The USB filesystem is not mounted"
+msgstr "Le système de fichiers USB n’est pas monté"
+
+msgid "Start backup"
+msgstr "Démarrer la sauvegarde"
+
+msgid "Cancel backup"
+msgstr "Annuler la sauvegarde"
+
+msgid "Live image warning"
+msgstr "Avertissement sur l’image à chaud"
+
+msgid "Unsupported system layout"
+msgstr "Organisation système non prise en charge"
+
+msgid "Whole disk (no partition table)"
+msgstr "Disque entier (sans table de partitions)"
+
+msgid "GPT (backup header will be relocated)"
+msgstr "GPT (l’en-tête de secours sera repositionné)"
+
+msgid "MBR or unpartitioned"
+msgstr "MBR ou sans partitions"
+
+msgid "Image:"
+msgstr "Image :"
+
+msgid "The active system disk will be read while OpenWrt is running. Avoid configuration changes and do not disconnect the USB device until completion."
+msgstr "Le disque système actif sera lu pendant le fonctionnement d’OpenWrt. Évitez les changements de configuration et ne débranchez pas le périphérique USB avant la fin."
+
+msgid "Create a raw .img file at the root of a mounted USB filesystem. The image includes the boot sectors and partition table and can be written with Balena Etcher, Rufus or dd."
+msgstr "Crée un fichier .img brut à la racine d’un système de fichiers USB monté. L’image contient les secteurs d’amorçage et la table de partitions et peut être écrite avec Balena Etcher, Rufus ou dd."
+
+msgid "The image is crash-consistent, not an atomic snapshot. For the strongest guarantee, create it from a recovery system with the source disk unmounted. NAND/UBI/MTD flash is intentionally unsupported."
+msgstr "L’image est cohérente comme après une coupure, mais ce n’est pas un instantané atomique. Pour la meilleure garantie, créez-la depuis un système de secours avec le disque source démonté. Les mémoires NAND/UBI/MTD ne sont volontairement pas prises en charge."
+
+msgid "No USB storage device was detected. Connect one, then refresh this page."
+msgstr "Aucun stockage USB n’a été détecté. Branchez-en un, puis actualisez cette page."

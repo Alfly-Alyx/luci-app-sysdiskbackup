@@ -1,0 +1,13 @@
+{
+	"admin/system/disk-backup": {
+		"title": "System image",
+		"order": 95,
+		"action": {
+			"type": "view",
+			"path": "system/disk-backup"
+		},
+		"depends": {
+			"acl": [ "luci-app-sysdiskbackup" ]
+		}
+	}
+}

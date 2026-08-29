@@ -1,0 +1,152 @@
+msgid ""
+msgstr "Content-Type: text/plain; charset=UTF-8\n"
+
+msgid "System image"
+msgstr ""
+
+msgid "System image backup"
+msgstr ""
+
+msgid "Create image"
+msgstr ""
+
+msgid "USB destination"
+msgstr ""
+
+msgid "Source"
+msgstr ""
+
+msgid "Backup status"
+msgstr ""
+
+msgid "Elapsed time"
+msgstr ""
+
+msgid "Estimated time remaining"
+msgstr ""
+
+msgid "Data write speed"
+msgstr ""
+
+msgid "Preparing the system image"
+msgstr ""
+
+msgid "Copying the system disk"
+msgstr ""
+
+msgid "Relocating the backup GPT header"
+msgstr ""
+
+msgid "Calculating the SHA-256 checksum"
+msgstr ""
+
+msgid "Finalizing the image"
+msgstr ""
+
+msgid "System image completed successfully"
+msgstr ""
+
+msgid "Backup cancelled"
+msgstr ""
+
+msgid "Backup failed"
+msgstr ""
+
+msgid "The previous backup process is no longer running"
+msgstr ""
+
+msgid "Source disk:"
+msgstr ""
+
+msgid "Automatically detected"
+msgstr ""
+
+msgid "Automatic detection failed"
+msgstr ""
+
+msgid "Manual source disk"
+msgstr ""
+
+msgid "Enter or select a source disk."
+msgstr ""
+
+msgid "No compatible physical disk was enumerated automatically. Enter the whole disk name, for example mmcblk0 or nvme0n1."
+msgstr ""
+
+msgid "Manual source selection is active. Verify the disk carefully; the package cannot prove that it contains the running system."
+msgstr ""
+
+msgid "Use manual selection only when you know which whole disk contains the boot sectors and the running OpenWrt installation."
+msgstr ""
+
+msgid "The active FIT system is stored on NAND/UBI and cannot be cloned as a portable raw disk image"
+msgstr ""
+
+msgid "The selected source is not a supported physical block disk"
+msgstr ""
+
+msgid "The selected source must be a whole physical disk"
+msgstr ""
+
+msgid "The selected source disk is unavailable"
+msgstr ""
+
+msgid "The selected eMMC service area is not a restorable system disk"
+msgstr ""
+
+msgid "Invalid source disk identifier"
+msgstr ""
+
+msgid "FAT32 split image: reassemble the parts before flashing"
+msgstr ""
+
+msgid "This FAT32 destination will receive split image files. Reassemble them on an NTFS, exFAT, ext4 or other large-file filesystem before using Balena Etcher or Rufus. No pre-existing file on the USB device will be deleted or overwritten."
+msgstr ""
+
+msgid "Automatic detection (recommended): %s"
+msgstr ""
+
+msgid "Force"
+msgstr ""
+
+msgid "Source mode"
+msgstr ""
+
+msgid "Automatic detection is recommended. Force a whole source disk only when you have verified it independently."
+msgstr ""
+
+msgid "FAT32 split files"
+msgstr ""
+
+msgid "USB ready — split FAT32"
+msgstr ""
+
+msgid "FAT32 split backup: %d parts. Reassemble them before flashing."
+msgstr ""
+
+msgid "Windows merge script:"
+msgstr ""
+
+msgid "Linux/macOS merge script:"
+msgstr ""
+
+msgid "The image would require too many FAT32 parts"
+msgstr ""
+
+msgid "A backup file with the generated name already exists"
+msgstr ""
+
+msgid "Unable to finalize the image parts"
+msgstr ""
+
+msgid "The image parts are complete, but the checksum file could not be written"
+msgstr ""
+
+msgid "The image parts are complete, but the Windows merge script could not be written"
+msgstr ""
+
+msgid "The image parts are complete, but the Linux merge script could not be written"
+msgstr ""
+
+msgid "The image parts are complete, but the restore instructions could not be written"
+msgstr ""

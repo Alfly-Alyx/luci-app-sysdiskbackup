@@ -1,0 +1,19 @@
+# Local build environments and generated package artifacts
+.build/
+.artifacts/
+dist/
+*.apk
+*.apk.sha256
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Local Codex metadata
+.codex/
+
+# Editor and operating-system files
+.DS_Store
+Thumbs.db
+*.swp
+*~

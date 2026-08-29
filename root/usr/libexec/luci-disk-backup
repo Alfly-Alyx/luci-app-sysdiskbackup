@@ -1,0 +1,1213 @@
+#!/bin/sh
+
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Creates a raw, flashable image of the active OpenWrt system disk.
+
+STATE_DIR="/tmp/luci-disk-backup"
+STATE_FILE="$STATE_DIR/state.json"
+PID_FILE="$STATE_DIR/worker.pid"
+LOCK_DIR="$STATE_DIR/lock"
+LOG_FILE="$STATE_DIR/worker.log"
+BLOCK_SIZE=4194304
+GPT_TAIL_SECTORS=2048
+SPACE_MARGIN_BYTES=16777216
+FAT32_PART_BYTES=2147483648
+
+. /usr/share/libubox/jshn.sh
+
+mkdir -p "$STATE_DIR"
+
+json_error() {
+	json_init
+	json_add_boolean ok 0
+	json_add_string error "$1"
+	json_dump
+}
+
+is_uint() {
+	case "${1:-}" in
+		''|*[!0-9]*) return 1 ;;
+		*) return 0 ;;
+	esac
+}
+
+read_uint() {
+	local value
+	[ -r "$1" ] || return 1
+	IFS= read -r value < "$1" || return 1
+	is_uint "$value" || return 1
+	printf '%s\n' "$value"
+}
+
+# OpenWrt's minimal BusyBox build does not necessarily provide the stat
+# applet. `ls -ln` still obtains the regular-file length without reading the
+# file contents, including for multi-gigabyte image parts.
+file_size() {
+	local value
+	[ -f "$1" ] || return 1
+	value="$(ls -ln "$1" 2>/dev/null | awk 'NR == 1 { print $5; exit }')"
+	is_uint "$value" || return 1
+	printf '%s\n' "$value"
+}
+
+decode_mountpoint() {
+	printf '%b\n' "$1"
+}
+
+block_from_devno() {
+	local path
+	[ -e "/sys/dev/block/$1" ] || return 1
+	path="$(readlink -f "/sys/dev/block/$1")" || return 1
+	basename "$path"
+}
+
+fit_backing_block() {
+	local rootdisk handle bootdev
+
+	[ -r /sys/firmware/devicetree/base/chosen/rootdisk ] || return 1
+	rootdisk="$(cat /sys/firmware/devicetree/base/chosen/rootdisk 2>/dev/null)" || return 1
+	[ -n "$rootdisk" ] || return 1
+
+	# This is the same rootdisk phandle mapping used by OpenWrt's
+	# MediaTek sysupgrade code. It maps fit0/fitrw back to mmcblk, NVMe
+	# or UBI without guessing from device numbering.
+	for handle in /sys/class/block/*/of_node/phandle /sys/class/block/*/device/of_node/phandle; do
+		[ -r "$handle" ] || continue
+		[ "$rootdisk" = "$(cat "$handle" 2>/dev/null)" ] || continue
+		bootdev="${handle%/of_node/phandle}"
+		bootdev="${bootdev%/device}"
+		bootdev="${bootdev#/sys/class/block/}"
+		[ -n "$bootdev" ] || return 1
+		printf '%s\n' "$bootdev"
+		return 0
+	done
+
+	return 1
+}
+
+disk_from_block() {
+	local current="$1" path parent slave count
+	local depth=0
+
+	while [ "$depth" -lt 8 ]; do
+		[ -e "/sys/class/block/$current" ] || return 1
+
+		case "$current" in
+			mtdblock*|ubi*|ubiblock*) return 1 ;;
+			fit[0-9]*|fitrw)
+				current="$(fit_backing_block)" || return 1
+				depth=$((depth + 1))
+				continue
+				;;
+		esac
+
+		path="$(readlink -f "/sys/class/block/$current")" || return 1
+
+		if [ -f "/sys/class/block/$current/partition" ]; then
+			parent="$(basename "$(dirname "$path")")"
+			[ "$parent" != "$current" ] || return 1
+			current="$parent"
+			depth=$((depth + 1))
+			continue
+		fi
+
+		count=0
+		parent=""
+		for slave in "/sys/class/block/$current/slaves/"*; do
+			[ -e "$slave" ] || continue
+			parent="$(basename "$slave")"
+			count=$((count + 1))
+		done
+
+		if [ "$count" -eq 1 ]; then
+			current="$parent"
+			depth=$((depth + 1))
+			continue
+		fi
+
+		[ "$count" -eq 0 ] || return 1
+		case "$current" in
+			loop*|ram*|zram*|dm-*|md*) return 1 ;;
+		esac
+
+		[ -r "/sys/class/block/$current/size" ] || return 1
+		printf '%s\n' "$current"
+		return 0
+	done
+
+	return 1
+}
+
+set_system_disk() {
+	local disk="$1" mapped
+
+	mapped="$(disk_from_block "$disk" 2>/dev/null)" || {
+		SYSTEM_ERROR="The selected source is not a supported physical block disk"
+		return 1
+	}
+	[ "$mapped" = "$disk" ] || {
+		SYSTEM_ERROR="The selected source must be a whole physical disk"
+		return 1
+	}
+	[ -b "/dev/$disk" ] || {
+		SYSTEM_ERROR="The selected source disk is unavailable"
+		return 1
+	}
+
+	case "$disk" in
+		mmcblk*boot*|mmcblk*rpmb)
+			SYSTEM_ERROR="The selected eMMC service area is not a restorable system disk"
+			return 1
+			;;
+	esac
+
+	SYSTEM_DISK="$disk"
+	SYSTEM_DEVICE="/dev/$SYSTEM_DISK"
+	SYSTEM_LOGICAL_BLOCK_SIZE="$(read_uint "/sys/class/block/$SYSTEM_DISK/queue/logical_block_size")" || {
+		SYSTEM_ERROR="Unable to read the system disk logical sector size"
+		return 1
+	}
+	if [ "$SYSTEM_LOGICAL_BLOCK_SIZE" -ne 512 ]; then
+		SYSTEM_ERROR="Only disks with 512-byte logical sectors can be imaged portably"
+		return 1
+	fi
+	SYSTEM_SECTORS="$(read_uint "/sys/class/block/$SYSTEM_DISK/size")" || {
+		SYSTEM_ERROR="Unable to read the system disk size"
+		return 1
+	}
+	SYSTEM_BYTES=$((SYSTEM_SECTORS * 512))
+	return 0
+}
+
+is_usb_disk() {
+	local path
+	path="$(readlink -f "/sys/class/block/$1")" || return 1
+
+	while [ "$path" != "/" ] && [ -n "$path" ]; do
+		if [ -r "$path/idVendor" ] && [ -r "$path/idProduct" ]; then
+			return 0
+		fi
+		path="$(dirname "$path")"
+	done
+
+	return 1
+}
+
+disk_text() {
+	local vendor model text
+	vendor="$(sed -n '1{s/^[[:space:]]*//;s/[[:space:]]*$//;p}' "/sys/class/block/$1/device/vendor" 2>/dev/null)"
+	model="$(sed -n '1{s/^[[:space:]]*//;s/[[:space:]]*$//;p}' "/sys/class/block/$1/device/model" 2>/dev/null)"
+	text="$vendor $model"
+	text="$(printf '%s' "$text" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g')"
+	[ -n "$text" ] || text="$1"
+	printf '%s\n' "$text"
+}
+
+mount_record_for_block() {
+	local wanted="$1" rw_only="${2:-1}" devno encoded options fstype block
+
+	awk '
+	{
+		fstype = ""
+		for (i = 7; i <= NF; i++) {
+			if ($i == "-" && i < NF) {
+				fstype = $(i + 1)
+				break
+			}
+		}
+		print $3 "|" $5 "|" $6 "|" fstype
+	}' /proc/self/mountinfo 2>/dev/null |
+	while IFS='|' read -r devno encoded options fstype; do
+		block="$(block_from_devno "$devno" 2>/dev/null)" || continue
+		[ "$block" = "$wanted" ] || continue
+		if [ "$rw_only" -eq 1 ]; then
+			case ",$options," in
+				*,rw,*) ;;
+				*) continue ;;
+			esac
+		fi
+		printf '%s|%s|%s|%s\n' "$devno" "$encoded" "$options" "$fstype"
+		break
+	done
+}
+
+detect_system_disk() {
+	local target devno block disk backing found="" found_count=0
+	SYSTEM_ERROR=""
+
+	for target in /rom /overlay /; do
+		devno="$(awk -v target="$target" '$5 == target { print $3; exit }' /proc/self/mountinfo 2>/dev/null)"
+		[ -n "$devno" ] || continue
+		block="$(block_from_devno "$devno" 2>/dev/null)" || continue
+		disk="$(disk_from_block "$block" 2>/dev/null)" || continue
+
+		case " $found " in
+			*" $disk "*) ;;
+			*)
+				found="$found $disk"
+				found_count=$((found_count + 1))
+				;;
+		esac
+	done
+
+	if [ "$found_count" -eq 0 ]; then
+		backing="$(fit_backing_block 2>/dev/null)"
+		case "$backing" in
+			mtdblock*|ubi*|ubiblock*)
+				SYSTEM_ERROR="The active FIT system is stored on NAND/UBI and cannot be cloned as a portable raw disk image"
+				;;
+			*)
+				SYSTEM_ERROR="Unable to map /rom, /overlay or / to a supported physical block disk"
+				;;
+		esac
+		return 1
+	fi
+
+	if [ "$found_count" -gt 1 ]; then
+		SYSTEM_ERROR="The active system spans multiple physical disks; a single raw image would be incomplete"
+		return 1
+	fi
+
+	set_system_disk "${found# }"
+}
+
+select_system_disk() {
+	local requested="${1:-auto}"
+
+	case "$requested" in
+		''|auto) detect_system_disk ;;
+		*[!A-Za-z0-9._-]*)
+			SYSTEM_ERROR="Invalid source disk identifier"
+			return 1
+			;;
+		*)
+			SYSTEM_ERROR=""
+			set_system_disk "$requested"
+			;;
+	esac
+}
+
+image_geometry() {
+	local entry name start size end max_end=0 have_partition=0 magic tail_bytes
+	LAST_PARTITION=""
+
+	for entry in /sys/class/block/*; do
+		[ -f "$entry/partition" ] || continue
+		name="$(basename "$entry")"
+		[ "$(disk_from_block "$name" 2>/dev/null)" = "$SYSTEM_DISK" ] || continue
+		start="$(read_uint "$entry/start")" || continue
+		size="$(read_uint "$entry/size")" || continue
+		end=$((start + size))
+		have_partition=1
+		if [ "$end" -gt "$max_end" ]; then
+			max_end="$end"
+			LAST_PARTITION="$name"
+		fi
+	done
+
+	if [ "$have_partition" -eq 0 ]; then
+		max_end="$SYSTEM_SECTORS"
+	fi
+
+	GPT=0
+	magic="$(dd if="$SYSTEM_DEVICE" bs=8 skip=64 count=1 2>/dev/null)"
+	if [ "$magic" = "EFI PART" ]; then
+		GPT=1
+		if [ "$max_end" -lt "$SYSTEM_SECTORS" ]; then
+			max_end=$((max_end + GPT_TAIL_SECTORS))
+			[ "$max_end" -le "$SYSTEM_SECTORS" ] || max_end="$SYSTEM_SECTORS"
+		fi
+	fi
+
+	IMAGE_SECTORS="$max_end"
+	IMAGE_BYTES=$((IMAGE_SECTORS * 512))
+	COPY_BYTES="$IMAGE_BYTES"
+	COPY_FULL_BLOCKS=$((COPY_BYTES / BLOCK_SIZE))
+	tail_bytes=$((COPY_BYTES % BLOCK_SIZE))
+	COPY_TAIL_SECTORS=$((tail_bytes / 512))
+	return 0
+}
+
+filesystem_label() {
+	local line
+	line="$(/sbin/block info "/dev/$1" 2>/dev/null | head -n 1)"
+	printf '%s\n' "$line" | sed -n 's/.*LABEL="\([^"]*\)".*/\1/p'
+}
+
+filesystem_type() {
+	local line
+	line="$(/sbin/block info "/dev/$1" 2>/dev/null | head -n 1)"
+	printf '%s\n' "$line" | sed -n 's/.*TYPE="\([^"]*\)".*/\1/p'
+}
+
+destination_details() {
+	local token="$1" record devno encoded options fstype disk mount stats
+
+	case "$token" in
+		''|*[!A-Za-z0-9._-]*) return 1 ;;
+	esac
+
+	record="$(mount_record_for_block "$token")"
+	[ -n "$record" ] || return 1
+	IFS='|' read -r devno encoded options fstype <<EOF
+$record
+EOF
+
+	disk="$(disk_from_block "$token" 2>/dev/null)" || return 1
+	is_usb_disk "$disk" || return 1
+	[ -z "${SYSTEM_DISK:-}" ] || [ "$disk" != "$SYSTEM_DISK" ] || return 1
+	mount="$(decode_mountpoint "$encoded")"
+	[ -d "$mount" ] || return 1
+
+	stats="$(df -Pk "$mount" 2>/dev/null | awk 'NR == 2 { print $2 "|" $4 }')"
+	[ -n "$stats" ] || return 1
+
+	DEST_TOKEN="$token"
+	DEST_DEVICE="/dev/$token"
+	DEST_DISK="$disk"
+	DEST_MOUNT="$mount"
+	DEST_FSTYPE="$fstype"
+	DEST_TOTAL_KB="${stats%%|*}"
+	DEST_FREE_KB="${stats#*|}"
+	is_uint "$DEST_TOTAL_KB" || return 1
+	is_uint "$DEST_FREE_KB" || return 1
+	DEST_TOTAL_BYTES=$((DEST_TOTAL_KB * 1024))
+	DEST_FREE_BYTES=$((DEST_FREE_KB * 1024))
+	DEST_ELIGIBLE=1
+	DEST_REASON=""
+	DEST_SPLIT=0
+
+	if [ -n "${COPY_BYTES:-}" ]; then
+		if [ "$DEST_FREE_BYTES" -lt $((COPY_BYTES + SPACE_MARGIN_BYTES)) ]; then
+			DEST_ELIGIBLE=0
+			DEST_REASON="Not enough free space for the image"
+		fi
+
+		case "$DEST_FSTYPE" in
+			vfat|msdos)
+				if [ "$COPY_BYTES" -ge 4294967295 ]; then
+					DEST_SPLIT=1
+					DEST_REASON="FAT32 split image: reassemble the parts before flashing"
+				fi
+				;;
+		esac
+	fi
+
+	return 0
+}
+
+add_system_json() {
+	json_add_object system
+	if detect_system_disk && image_geometry; then
+		json_add_boolean supported 1
+		json_add_string disk "$SYSTEM_DISK"
+		json_add_string device "$SYSTEM_DEVICE"
+		json_add_string description "$(disk_text "$SYSTEM_DISK")"
+		json_add_string disk_bytes "$SYSTEM_BYTES"
+		json_add_string logical_sector_bytes "$SYSTEM_LOGICAL_BLOCK_SIZE"
+		json_add_string image_bytes "$COPY_BYTES"
+		json_add_string image_sectors "$IMAGE_SECTORS"
+		json_add_string last_partition "$LAST_PARTITION"
+		json_add_boolean gpt "$GPT"
+	else
+		json_add_boolean supported 0
+		json_add_string error "$SYSTEM_ERROR"
+	fi
+	json_close_object
+}
+
+add_sources_json() {
+	local entry block disk logical sectors bytes usb
+
+	json_add_array sources
+	for entry in /sys/class/block/*; do
+		[ -e "$entry" ] || continue
+		block="$(basename "$entry")"
+		disk="$(disk_from_block "$block" 2>/dev/null)" || continue
+		[ "$disk" = "$block" ] || continue
+
+		case "$disk" in
+			mmcblk*boot*|mmcblk*rpmb) continue ;;
+		esac
+		[ -b "/dev/$disk" ] || continue
+
+		logical="$(read_uint "$entry/queue/logical_block_size" 2>/dev/null)"
+		[ "$logical" = "512" ] || continue
+		sectors="$(read_uint "$entry/size" 2>/dev/null)"
+		is_uint "$sectors" || continue
+		[ "$sectors" -gt 0 ] || continue
+		bytes=$((sectors * 512))
+		if is_usb_disk "$disk"; then usb=1; else usb=0; fi
+
+		json_add_object ""
+		json_add_string token "$disk"
+		json_add_string device "/dev/$disk"
+		json_add_string description "$(disk_text "$disk")"
+		json_add_string disk_bytes "$bytes"
+		json_add_string logical_sector_bytes "$logical"
+		json_add_boolean usb "$usb"
+		json_close_object
+	done
+	json_close_array
+}
+
+probe_command() {
+	local entry block disk label fstype size_sectors total_bytes record devno encoded options mounted mountpoint
+	local stats total_kb free_kb free_known
+
+	json_init
+	json_add_boolean ok 1
+	add_system_json
+	add_sources_json
+	json_add_array destinations
+
+	for entry in /sys/class/block/*; do
+			[ -e "$entry" ] || continue
+			block="$(basename "$entry")"
+			disk="$(disk_from_block "$block" 2>/dev/null)" || continue
+			[ -z "${SYSTEM_DISK:-}" ] || [ "$disk" != "$SYSTEM_DISK" ] || continue
+			is_usb_disk "$disk" || continue
+
+			label="$(filesystem_label "$block")"
+			fstype="$(filesystem_type "$block")"
+			size_sectors="$(read_uint "$entry/size" 2>/dev/null)"
+			is_uint "$size_sectors" || size_sectors=0
+			total_bytes=$((size_sectors * 512))
+
+			if destination_details "$block"; then
+				mounted=1
+				mountpoint="$DEST_MOUNT"
+				free_known=1
+			else
+				mounted=0
+				mountpoint=""
+				free_known=0
+				record="$(mount_record_for_block "$block" 0)"
+				if [ -n "$record" ]; then
+					IFS='|' read -r devno encoded options fstype <<EOF
+$record
+EOF
+					mounted=1
+					mountpoint="$(decode_mountpoint "$encoded")"
+				fi
+
+				DEST_TOKEN="$block"
+				DEST_DEVICE="/dev/$block"
+				DEST_DISK="$disk"
+				DEST_MOUNT="$mountpoint"
+				DEST_FSTYPE="$fstype"
+				DEST_TOTAL_BYTES="$total_bytes"
+				DEST_FREE_BYTES="0"
+				if [ "$mounted" -eq 1 ]; then
+					stats="$(df -Pk "$mountpoint" 2>/dev/null | awk 'NR == 2 { print $2 "|" $4 }')"
+					total_kb="${stats%%|*}"
+					free_kb="${stats#*|}"
+					if is_uint "$total_kb" && is_uint "$free_kb"; then
+						DEST_TOTAL_BYTES=$((total_kb * 1024))
+						DEST_FREE_BYTES=$((free_kb * 1024))
+						free_known=1
+					fi
+				fi
+				DEST_ELIGIBLE=0
+				DEST_SPLIT=0
+				if [ "$mounted" -eq 1 ]; then
+					DEST_REASON="The USB filesystem is not mounted read-write"
+				elif [ -z "$fstype" ]; then
+					DEST_REASON="No usable filesystem was recognized on this block device"
+				else
+					DEST_REASON="The USB filesystem is not mounted"
+				fi
+			fi
+
+			json_add_object ""
+			json_add_string token "$DEST_TOKEN"
+			json_add_string device "$DEST_DEVICE"
+			json_add_string disk "$DEST_DISK"
+			json_add_string description "$(disk_text "$DEST_DISK")"
+			json_add_string mountpoint "$mountpoint"
+			json_add_string filesystem "$DEST_FSTYPE"
+			json_add_string label "$label"
+			json_add_string total_bytes "$DEST_TOTAL_BYTES"
+			json_add_string free_bytes "$DEST_FREE_BYTES"
+			json_add_boolean usb 1
+			json_add_boolean mounted "$mounted"
+			json_add_boolean free_known "$free_known"
+			json_add_boolean eligible "$DEST_ELIGIBLE"
+			json_add_boolean split "$DEST_SPLIT"
+			json_add_string reason "$DEST_REASON"
+			json_close_object
+		done
+
+	json_close_array
+	json_dump
+}
+
+state_write() {
+	local status="$1" stage="$2" percent="$3" message="$4" tmp now
+	case "$status" in
+		completed|failed|cancelled) JOB_ETA_SECONDS="0" ;;
+	esac
+	if [ -n "${JOB_STARTED_AT:-}" ]; then
+		now="$(date '+%s')"
+		JOB_ELAPSED_SECONDS=$((now - JOB_STARTED_AT))
+		[ "$JOB_ELAPSED_SECONDS" -ge 0 ] || JOB_ELAPSED_SECONDS=0
+	fi
+	tmp="$STATE_FILE.$$"
+	json_init
+	json_add_boolean ok 1
+	json_add_string status "$status"
+	json_add_string stage "$stage"
+	json_add_int percent "$percent"
+	json_add_string message "$message"
+	[ -n "${JOB_SOURCE:-}" ] && json_add_string source "$JOB_SOURCE"
+	[ -n "${JOB_DESTINATION:-}" ] && json_add_string destination "$JOB_DESTINATION"
+	[ -n "${JOB_MOUNT:-}" ] && json_add_string mountpoint "$JOB_MOUNT"
+	[ -n "${JOB_OUTPUT:-}" ] && json_add_string output "$JOB_OUTPUT"
+	[ -n "${JOB_IMAGE_BYTES:-}" ] && json_add_string image_bytes "$JOB_IMAGE_BYTES"
+	[ -n "${JOB_WRITTEN_BYTES:-}" ] && json_add_string written_bytes "$JOB_WRITTEN_BYTES"
+	[ -n "${JOB_SHA256:-}" ] && json_add_string sha256 "$JOB_SHA256"
+	[ -n "${JOB_SEGMENTED:-}" ] && json_add_boolean segmented "$JOB_SEGMENTED"
+	[ -n "${JOB_PART_COUNT:-}" ] && json_add_int part_count "$JOB_PART_COUNT"
+	[ -n "${JOB_MERGE_WINDOWS:-}" ] && json_add_string merge_windows "$JOB_MERGE_WINDOWS"
+	[ -n "${JOB_MERGE_UNIX:-}" ] && json_add_string merge_unix "$JOB_MERGE_UNIX"
+	[ -n "${JOB_ERROR:-}" ] && json_add_string error "$JOB_ERROR"
+	[ -n "${JOB_ELAPSED_SECONDS:-}" ] && json_add_int elapsed_seconds "$JOB_ELAPSED_SECONDS"
+	[ -n "${JOB_ETA_SECONDS:-}" ] && json_add_int eta_seconds "$JOB_ETA_SECONDS"
+	[ -n "${JOB_WRITE_BPS:-}" ] && json_add_string write_bps "$JOB_WRITE_BPS"
+	json_dump > "$tmp"
+	mv "$tmp" "$STATE_FILE"
+}
+
+status_command() {
+	local current
+
+	if [ -r "$STATE_FILE" ]; then
+		current="$(jsonfilter -i "$STATE_FILE" -e '@.status' 2>/dev/null)"
+		case "$current" in
+			starting|running|cancelling)
+				if { [ -r "$PID_FILE" ] && ! worker_alive; } || { [ ! -r "$PID_FILE" ] && [ ! -d "$LOCK_DIR" ]; }; then
+					rm -f "$PID_FILE"
+					rmdir "$LOCK_DIR" 2>/dev/null || true
+					json_init
+					json_add_boolean ok 1
+					json_add_string status failed
+					json_add_string stage stale
+					json_add_int percent 0
+					json_add_string message "The previous backup process is no longer running"
+					json_add_string error "The previous backup process is no longer running"
+					json_add_int eta_seconds 0
+					json_dump
+					return 0
+				fi
+				;;
+		esac
+		cat "$STATE_FILE"
+	else
+		json_init
+		json_add_boolean ok 1
+		json_add_string status idle
+		json_add_string stage idle
+		json_add_int percent 0
+		json_add_string message "No backup has been started"
+		json_dump
+	fi
+}
+
+worker_alive() {
+	local pid cmdline
+	[ -r "$PID_FILE" ] || return 1
+	IFS= read -r pid < "$PID_FILE" || return 1
+	is_uint "$pid" || return 1
+	[ -r "/proc/$pid/cmdline" ] || return 1
+	cmdline="$(tr '\000' ' ' < "/proc/$pid/cmdline" 2>/dev/null)"
+	case "$cmdline" in
+		*"/usr/libexec/luci-disk-backup"*"run"*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+cleanup_stale_lock() {
+	if [ -d "$LOCK_DIR" ] && ! worker_alive; then
+		rmdir "$LOCK_DIR" 2>/dev/null || true
+		rm -f "$PID_FILE"
+	fi
+}
+
+start_command() {
+	local target="${1:-}" source="${2:-auto}" pid
+
+	case "$target" in
+		''|*[!A-Za-z0-9._-]*) json_error "Invalid destination identifier"; return 1 ;;
+	esac
+
+	cleanup_stale_lock
+	if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+		json_error "A backup is already running"
+		return 1
+	fi
+
+	if ! select_system_disk "$source" || ! image_geometry; then
+		rmdir "$LOCK_DIR" 2>/dev/null || true
+		json_error "$SYSTEM_ERROR"
+		return 1
+	fi
+
+	if ! destination_details "$target"; then
+		rmdir "$LOCK_DIR" 2>/dev/null || true
+		json_error "The selected destination is not a mounted USB filesystem"
+		return 1
+	fi
+
+	if [ "$DEST_ELIGIBLE" -ne 1 ]; then
+		rmdir "$LOCK_DIR" 2>/dev/null || true
+		json_error "$DEST_REASON"
+		return 1
+	fi
+
+	JOB_SOURCE="$SYSTEM_DEVICE"
+	JOB_DESTINATION="$DEST_DEVICE"
+	JOB_MOUNT="$DEST_MOUNT"
+	JOB_IMAGE_BYTES="$COPY_BYTES"
+	JOB_SEGMENTED="$DEST_SPLIT"
+	JOB_PART_COUNT=""
+	JOB_MERGE_WINDOWS=""
+	JOB_MERGE_UNIX=""
+	JOB_ELAPSED_SECONDS="0"
+	JOB_ETA_SECONDS=""
+	JOB_WRITE_BPS=""
+	state_write starting prepare 0 "Preparing the system image"
+	: > "$LOG_FILE"
+
+	"$0" run "$target" "$SYSTEM_DISK" >> "$LOG_FILE" 2>&1 </dev/null &
+	pid=$!
+	printf '%s\n' "$pid" > "$PID_FILE"
+
+	json_init
+	json_add_boolean ok 1
+	json_add_string status started
+	json_add_int pid "$pid"
+	json_dump
+}
+
+cancel_command() {
+	local pid
+
+	if ! worker_alive; then
+		json_error "No backup is running"
+		return 1
+	fi
+
+	IFS= read -r pid < "$PID_FILE"
+	touch "$STATE_DIR/cancel"
+	kill -TERM "$pid" 2>/dev/null || {
+		json_error "Unable to stop the backup"
+		return 1
+	}
+
+	json_init
+	json_add_boolean ok 1
+	json_add_string status cancelling
+	json_dump
+}
+
+run_command() {
+	local target="$1" source="${2:-auto}" hostname stamp basename partial dd_pid dd_status size percent hash
+	local now elapsed previous_time previous_size delta_time delta_size instant_rate average_rate
+	local hash_file hash_pid hash_status checksum_start checksum_read checksum_rate checksum_elapsed
+	local checksum_progress checksum_pid checksum_completed checksum_position checksum_candidate progress_tmp
+	local tail_start_sector part_list created_list final_list stream_status stream_result
+	local part_index part_count part_suffix part_path part_final part_bytes part_full_blocks
+	local part_tail_bytes part_tail_sectors part_source_blocks part_source_sector part_seek_sector
+	local source_offset first_part last_part last_part_start current_size path name
+	local checksum_path cmd_path sh_path instructions_path first final_name
+	local cancelled=0
+
+	JOB_SOURCE=""
+	JOB_DESTINATION=""
+	JOB_MOUNT=""
+	JOB_OUTPUT=""
+	JOB_IMAGE_BYTES=""
+	JOB_WRITTEN_BYTES="0"
+	JOB_SHA256=""
+	JOB_ERROR=""
+	JOB_SEGMENTED="0"
+	JOB_PART_COUNT=""
+	JOB_MERGE_WINDOWS=""
+	JOB_MERGE_UNIX=""
+	JOB_STARTED_AT="$(date '+%s')"
+	JOB_ELAPSED_SECONDS="0"
+	JOB_ETA_SECONDS=""
+	JOB_WRITE_BPS=""
+	hash_pid=""
+	hash_file=""
+	part_list="$STATE_DIR/parts.$$"
+	created_list="$STATE_DIR/created.$$"
+	final_list="$STATE_DIR/final-parts.$$"
+	stream_status="$STATE_DIR/stream-status.$$"
+	checksum_progress="$STATE_DIR/checksum-progress.$$"
+	: > "$part_list"
+	: > "$created_list"
+	: > "$final_list"
+	rm -f "$stream_status" "$checksum_progress" "$checksum_progress.tmp" "$STATE_DIR/cancel"
+
+	on_term() {
+		cancelled=1
+		touch "$STATE_DIR/cancel"
+		[ -n "${dd_pid:-}" ] && kill -TERM "$dd_pid" 2>/dev/null || true
+		[ -n "${hash_pid:-}" ] && kill -TERM "$hash_pid" 2>/dev/null || true
+	}
+
+	cleanup_worker() {
+		[ -n "${hash_file:-}" ] && rm -f "$hash_file"
+		rm -f "$part_list" "$created_list" "$final_list" "$stream_status" "$checksum_progress" "$checksum_progress.tmp" "$PID_FILE"
+		rmdir "$LOCK_DIR" 2>/dev/null || true
+	}
+
+	cleanup_created_files() {
+		[ -r "$created_list" ] || return 0
+		while IFS= read -r path; do
+			[ -n "$path" ] && rm -f "$path"
+		done < "$created_list"
+		: > "$created_list"
+	}
+
+	reserve_output() {
+		local reserved="$1"
+		[ ! -e "$reserved" ] || return 1
+		(umask 077; set -C; : > "$reserved") 2>/dev/null || return 1
+		printf '%s\n' "$reserved" >> "$created_list"
+	}
+
+	trap on_term TERM INT
+	trap cleanup_worker EXIT
+
+	monitor_copy() {
+		local monitored_pid="$1" monitored_file="$2" completed_bytes="$3"
+		while kill -0 "$monitored_pid" 2>/dev/null; do
+			if [ -f "$STATE_DIR/cancel" ]; then
+				cancelled=1
+				kill -TERM "$monitored_pid" 2>/dev/null || true
+			fi
+
+			current_size="$(file_size "$monitored_file" 2>/dev/null)"
+			is_uint "$current_size" || current_size=0
+			size=$((completed_bytes + current_size))
+			[ "$size" -le "$COPY_BYTES" ] || size="$COPY_BYTES"
+			JOB_WRITTEN_BYTES="$size"
+			now="$(date '+%s')"
+			elapsed=$((now - JOB_STARTED_AT))
+			delta_time=$((now - previous_time))
+			delta_size=$((size - previous_size))
+			if [ "$delta_time" -gt 0 ] && [ "$delta_size" -ge 0 ]; then
+				instant_rate=$((delta_size / delta_time))
+				if [ -n "$JOB_WRITE_BPS" ] && [ "$JOB_WRITE_BPS" -gt 0 ]; then
+					JOB_WRITE_BPS=$(((JOB_WRITE_BPS * 3 + instant_rate) / 4))
+				else
+					JOB_WRITE_BPS="$instant_rate"
+				fi
+				previous_time="$now"
+				previous_size="$size"
+			fi
+
+			if [ "$elapsed" -gt 0 ] && [ "$size" -gt 0 ]; then
+				average_rate=$((size / elapsed))
+				if [ "$average_rate" -gt 0 ]; then
+					JOB_ETA_SECONDS=$(((COPY_BYTES - size + COPY_BYTES) / average_rate))
+				fi
+			fi
+			percent=$((size * 90 / COPY_BYTES))
+			state_write running copy "$percent" "Copying the system disk"
+			sleep 2
+		done
+	}
+
+	if ! select_system_disk "$source" || ! image_geometry; then
+		JOB_ERROR="$SYSTEM_ERROR"
+		state_write failed prepare 0 "Unable to detect the system disk"
+		return 1
+	fi
+
+	if ! destination_details "$target"; then
+		JOB_ERROR="The USB destination disappeared or was remounted"
+		state_write failed prepare 0 "$JOB_ERROR"
+		return 1
+	fi
+
+	if [ "$DEST_ELIGIBLE" -ne 1 ]; then
+		JOB_ERROR="$DEST_REASON"
+		state_write failed prepare 0 "$JOB_ERROR"
+		return 1
+	fi
+
+	hostname="$(uci -q get system.@system[0].hostname 2>/dev/null)"
+	[ -n "$hostname" ] || hostname="openwrt"
+	hostname="$(printf '%s' "$hostname" | tr -cd 'A-Za-z0-9._-')"
+	[ -n "$hostname" ] || hostname="openwrt"
+	stamp="$(date '+%Y%m%d-%H%M%S')"
+	basename="openwrt-${hostname}-${stamp}.img"
+	checksum_path="$DEST_MOUNT/$basename.sha256"
+
+	JOB_SOURCE="$SYSTEM_DEVICE"
+	JOB_DESTINATION="$DEST_DEVICE"
+	JOB_MOUNT="$DEST_MOUNT"
+	JOB_IMAGE_BYTES="$COPY_BYTES"
+	JOB_SEGMENTED="$DEST_SPLIT"
+
+	if [ "$DEST_SPLIT" -eq 1 ]; then
+		part_count=$(((COPY_BYTES + FAT32_PART_BYTES - 1) / FAT32_PART_BYTES))
+		[ "$part_count" -le 999 ] || {
+			JOB_ERROR="The image would require too many FAT32 parts"
+			state_write failed prepare 0 "$JOB_ERROR"
+			return 1
+		}
+		JOB_PART_COUNT="$part_count"
+		JOB_OUTPUT="$DEST_MOUNT/$basename.part001"
+		cmd_path="$DEST_MOUNT/$basename-merge-windows.cmd"
+		sh_path="$DEST_MOUNT/$basename-merge-linux.sh"
+		instructions_path="$DEST_MOUNT/$basename-RESTORE.txt"
+		JOB_MERGE_WINDOWS="$cmd_path"
+		JOB_MERGE_UNIX="$sh_path"
+		if [ -e "$DEST_MOUNT/$basename" ] || ! reserve_output "$checksum_path" || ! reserve_output "$cmd_path" || ! reserve_output "$sh_path" || ! reserve_output "$instructions_path"; then
+			cleanup_created_files
+			JOB_ERROR="A backup file with the generated name already exists"
+			state_write failed prepare 0 "$JOB_ERROR"
+			return 1
+		fi
+	else
+		partial="$DEST_MOUNT/.${basename}.partial"
+		JOB_OUTPUT="$DEST_MOUNT/$basename"
+		if [ -e "$JOB_OUTPUT" ] || ! reserve_output "$checksum_path" || ! reserve_output "$partial"; then
+			cleanup_created_files
+			JOB_ERROR="A backup file with the generated name already exists"
+			state_write failed prepare 0 "$JOB_ERROR"
+			return 1
+		fi
+	fi
+
+	state_write running copy 0 "Copying the system disk"
+	sync
+	previous_time="$(date '+%s')"
+	previous_size=0
+	dd_status=0
+
+	if [ "$DEST_SPLIT" -eq 1 ]; then
+		source_offset=0
+		part_index=1
+		first_part=""
+		last_part=""
+		last_part_start=0
+		while [ "$source_offset" -lt "$COPY_BYTES" ]; do
+			part_suffix="$(printf '%03d' "$part_index")"
+			part_path="$DEST_MOUNT/.${basename}.part${part_suffix}.partial"
+			part_final="$DEST_MOUNT/${basename}.part${part_suffix}"
+			if [ -e "$part_final" ] || ! reserve_output "$part_path"; then
+				dd_status=1
+				break
+			fi
+			printf '%s\n' "$part_path" >> "$part_list"
+			[ -n "$first_part" ] || first_part="$part_path"
+			last_part="$part_path"
+			last_part_start="$source_offset"
+
+			part_bytes=$((COPY_BYTES - source_offset))
+			[ "$part_bytes" -le "$FAT32_PART_BYTES" ] || part_bytes="$FAT32_PART_BYTES"
+			part_full_blocks=$((part_bytes / BLOCK_SIZE))
+			part_tail_bytes=$((part_bytes % BLOCK_SIZE))
+			part_tail_sectors=$((part_tail_bytes / 512))
+			part_source_blocks=$((source_offset / BLOCK_SIZE))
+
+			if [ "$part_full_blocks" -gt 0 ]; then
+				dd if="$SYSTEM_DEVICE" of="$part_path" bs="$BLOCK_SIZE" skip="$part_source_blocks" count="$part_full_blocks" 2>> "$LOG_FILE" &
+				dd_pid=$!
+				monitor_copy "$dd_pid" "$part_path" "$source_offset"
+				wait "$dd_pid" || dd_status=$?
+				dd_pid=""
+			fi
+
+			if [ "$dd_status" -eq 0 ] && [ "$cancelled" -eq 0 ] && [ "$part_tail_sectors" -gt 0 ]; then
+				part_seek_sector=$((part_full_blocks * BLOCK_SIZE / 512))
+				part_source_sector=$((source_offset / 512 + part_seek_sector))
+				dd if="$SYSTEM_DEVICE" of="$part_path" bs=512 skip="$part_source_sector" seek="$part_seek_sector" count="$part_tail_sectors" conv=notrunc 2>> "$LOG_FILE" &
+				dd_pid=$!
+				monitor_copy "$dd_pid" "$part_path" "$source_offset"
+				wait "$dd_pid" || dd_status=$?
+				dd_pid=""
+			fi
+
+			current_size="$(file_size "$part_path" 2>/dev/null)"
+			if [ "$dd_status" -ne 0 ] || ! is_uint "$current_size" || [ "$current_size" -ne "$part_bytes" ]; then
+				dd_status=1
+				break
+			fi
+			source_offset=$((source_offset + part_bytes))
+			part_index=$((part_index + 1))
+		done
+		size="$source_offset"
+	else
+		if [ "$COPY_FULL_BLOCKS" -gt 0 ]; then
+			dd if="$SYSTEM_DEVICE" of="$partial" bs="$BLOCK_SIZE" count="$COPY_FULL_BLOCKS" 2>> "$LOG_FILE" &
+			dd_pid=$!
+			monitor_copy "$dd_pid" "$partial" 0
+			wait "$dd_pid" || dd_status=$?
+			dd_pid=""
+		fi
+
+		if [ "$dd_status" -eq 0 ] && [ "$cancelled" -eq 0 ] && [ "$COPY_TAIL_SECTORS" -gt 0 ]; then
+			tail_start_sector=$((COPY_FULL_BLOCKS * BLOCK_SIZE / 512))
+			dd if="$SYSTEM_DEVICE" of="$partial" bs=512 skip="$tail_start_sector" seek="$tail_start_sector" count="$COPY_TAIL_SECTORS" conv=notrunc 2>> "$LOG_FILE" &
+			dd_pid=$!
+			monitor_copy "$dd_pid" "$partial" 0
+			wait "$dd_pid" || dd_status=$?
+			dd_pid=""
+		fi
+		size="$(file_size "$partial" 2>/dev/null)"
+	fi
+
+	if [ "$cancelled" -eq 1 ] || [ -f "$STATE_DIR/cancel" ]; then
+		cleanup_created_files
+		JOB_ERROR="Backup cancelled by the user"
+		state_write cancelled cancelled 0 "$JOB_ERROR"
+		return 0
+	fi
+
+	if [ "$dd_status" -ne 0 ]; then
+		cleanup_created_files
+		JOB_ERROR="A read or write error interrupted the disk copy"
+		state_write failed copy 0 "$JOB_ERROR"
+		return 1
+	fi
+
+	if ! is_uint "$size" || [ "$size" -ne "$COPY_BYTES" ]; then
+		cleanup_created_files
+		JOB_ERROR="The generated image is shorter than expected"
+		state_write failed verify 0 "$JOB_ERROR"
+		return 1
+	fi
+	JOB_WRITTEN_BYTES="$size"
+	now="$(date '+%s')"
+	elapsed=$((now - JOB_STARTED_AT))
+	if [ "$elapsed" -gt 0 ]; then
+		average_rate=$((size / elapsed))
+		if [ "$average_rate" -gt 0 ]; then
+			[ -n "$JOB_WRITE_BPS" ] || JOB_WRITE_BPS="$average_rate"
+			JOB_ETA_SECONDS=$((COPY_BYTES / average_rate))
+		fi
+	fi
+
+	if [ "$GPT" -eq 1 ] && [ "$COPY_BYTES" -lt "$SYSTEM_BYTES" ]; then
+		state_write running gpt 90 "Relocating the backup GPT header"
+		if [ "$DEST_SPLIT" -eq 1 ]; then
+			/usr/bin/ucode /usr/libexec/luci-gpt-relocate.uc --split "$first_part" "$last_part" "$COPY_BYTES" "$last_part_start" >> "$LOG_FILE" 2>&1
+		else
+			/usr/bin/ucode /usr/libexec/luci-gpt-relocate.uc "$partial" >> "$LOG_FILE" 2>&1
+		fi
+		if [ "$?" -ne 0 ]; then
+			cleanup_created_files
+			JOB_ERROR="Unable to repair the GPT copy"
+			state_write failed gpt 0 "$JOB_ERROR"
+			return 1
+		fi
+	fi
+
+	state_write running checksum 90 "Calculating the SHA-256 checksum"
+	hash_file="$STATE_DIR/hash.$$"
+	checksum_start="$(date '+%s')"
+	checksum_read=0
+	stream_result=0
+	: > "$checksum_progress"
+	[ "$DEST_SPLIT" -eq 1 ] || printf '%s\n' "$partial" > "$part_list"
+	(
+		stream_result=0
+		checksum_completed=0
+		while IFS= read -r path; do
+			cat < "$path" &
+			checksum_pid=$!
+			progress_tmp="$checksum_progress.tmp"
+			printf '%s %s\n' "$checksum_pid" "$checksum_completed" > "$progress_tmp"
+			mv "$progress_tmp" "$checksum_progress"
+			if ! wait "$checksum_pid"; then
+				stream_result=1
+				break
+			fi
+			current_size="$(file_size "$path" 2>/dev/null)"
+			if ! is_uint "$current_size"; then
+				stream_result=1
+				break
+			fi
+			checksum_completed=$((checksum_completed + current_size))
+		done < "$part_list"
+		printf '%s\n' "$stream_result" > "$stream_status"
+		exit "$stream_result"
+	) | sha256sum > "$hash_file" 2>> "$LOG_FILE" &
+	hash_pid=$!
+	while kill -0 "$hash_pid" 2>/dev/null; do
+		if [ -f "$STATE_DIR/cancel" ]; then
+			cancelled=1
+			kill -TERM "$hash_pid" 2>/dev/null || true
+		fi
+
+		checksum_pid=""
+		checksum_completed=""
+		if IFS=' ' read -r checksum_pid checksum_completed < "$checksum_progress" 2>/dev/null \
+			&& is_uint "$checksum_pid" && is_uint "$checksum_completed"; then
+			checksum_position="$(awk '$1 == "pos:" { print $2; exit }' "/proc/$checksum_pid/fdinfo/0" 2>/dev/null)"
+			if is_uint "$checksum_position"; then
+				checksum_candidate=$((checksum_completed + checksum_position))
+				[ "$checksum_candidate" -ge "$checksum_read" ] && checksum_read="$checksum_candidate"
+			fi
+		fi
+		[ "$checksum_read" -le "$COPY_BYTES" ] || checksum_read="$COPY_BYTES"
+		now="$(date '+%s')"
+		checksum_elapsed=$((now - checksum_start))
+		if [ "$checksum_elapsed" -gt 0 ] && [ "$checksum_read" -gt 0 ]; then
+			checksum_rate=$((checksum_read / checksum_elapsed))
+			if [ "$checksum_rate" -gt 0 ]; then
+				JOB_ETA_SECONDS=$(((COPY_BYTES - checksum_read) / checksum_rate))
+			fi
+		fi
+		percent=$((90 + checksum_read * 9 / COPY_BYTES))
+		state_write running checksum "$percent" "Calculating the SHA-256 checksum"
+		sleep 2
+	done
+
+	wait "$hash_pid"
+	hash_status=$?
+	hash_pid=""
+	if [ "$DEST_SPLIT" -eq 1 ]; then
+		stream_result="$(cat "$stream_status" 2>/dev/null)"
+		[ "$stream_result" = "0" ] || hash_status=1
+	fi
+
+	if [ "$cancelled" -eq 1 ] || [ -f "$STATE_DIR/cancel" ]; then
+		cleanup_created_files
+		JOB_ERROR="Backup cancelled by the user"
+		JOB_ETA_SECONDS="0"
+		state_write cancelled cancelled 0 "$JOB_ERROR"
+		return 0
+	fi
+
+	hash="$(awk 'NR == 1 { print $1 }' "$hash_file" 2>/dev/null)"
+	rm -f "$hash_file"
+	hash_file=""
+	if [ "$hash_status" -ne 0 ] || [ "${#hash}" -ne 64 ]; then
+		cleanup_created_files
+		JOB_ERROR="Unable to calculate the image checksum"
+		state_write failed checksum 0 "$JOB_ERROR"
+		return 1
+	fi
+
+	JOB_ETA_SECONDS="0"
+	state_write running finalize 99 "Finalizing the image"
+	if [ "$DEST_SPLIT" -eq 1 ]; then
+		while IFS= read -r part_path; do
+			name="${part_path##*/}"
+			final_name="${name#.}"
+			final_name="${final_name%.partial}"
+			part_final="$DEST_MOUNT/$final_name"
+			if [ -e "$part_final" ] || ! mv "$part_path" "$part_final"; then
+				JOB_ERROR="Unable to finalize the image parts"
+				state_write failed finalize 0 "$JOB_ERROR"
+				return 1
+			fi
+			printf '%s\n' "$part_final" >> "$final_list"
+		done < "$part_list"
+
+		if ! printf '%s  %s\n' "$hash" "$basename" > "$checksum_path"; then
+			JOB_ERROR="The image parts are complete, but the checksum file could not be written"
+			JOB_SHA256="$hash"
+			state_write failed finalize 100 "$JOB_ERROR"
+			return 1
+		fi
+
+		{
+			printf '@echo off\r\nsetlocal\r\npushd "%%~dp0"\r\n'
+			printf 'if "%%~1"=="" (\r\n  echo Usage: %%~nx0 "C:\\\\path\\\\%s"\r\n  exit /b 2\r\n)\r\n' "$basename"
+			printf 'if exist "%%~1" (\r\n  echo Refusing to overwrite %%~1\r\n  exit /b 1\r\n)\r\n'
+			printf 'copy /b '
+			first=1
+			while IFS= read -r part_final; do
+				name="${part_final##*/}"
+				if [ "$first" -eq 1 ]; then
+					printf '"%s"' "$name"
+					first=0
+				else
+					printf '+"%s"' "$name"
+				fi
+			done < "$final_list"
+			printf ' "%%~1"\r\nif errorlevel 1 exit /b 1\r\n'
+			printf 'certutil -hashfile "%%~1" SHA256\r\necho Expected SHA-256: %s\r\n' "$hash"
+		} > "$cmd_path" || {
+			JOB_ERROR="The image parts are complete, but the Windows merge script could not be written"
+			state_write failed finalize 100 "$JOB_ERROR"
+			return 1
+		}
+
+		{
+			printf '#!/bin/sh\nset -eu\n[ "$#" -eq 1 ] || { echo "Usage: $0 OUTPUT.img"; exit 2; }\n[ ! -e "$1" ] || { echo "Refusing to overwrite $1"; exit 1; }\ncd "$(dirname "$0")"\ncat'
+			while IFS= read -r part_final; do
+				printf " '%s'" "${part_final##*/}"
+			done < "$final_list"
+			printf ' > "$1"\nprintf '\''%s  %%s\\n'\'' "$1" | sha256sum -c -\n' "$hash"
+		} > "$sh_path" || {
+			JOB_ERROR="The image parts are complete, but the Linux merge script could not be written"
+			state_write failed finalize 100 "$JOB_ERROR"
+			return 1
+		}
+
+		{
+			printf 'FAT32 SPLIT RAW IMAGE\n\n'
+			printf 'The raw image is %s bytes and was split into %s parts because FAT32 cannot store files of 4 GiB or more.\n' "$COPY_BYTES" "$part_count"
+			printf 'No pre-existing file on the USB device was deleted or overwritten.\n\n'
+			printf 'Windows: open Command Prompt and run:\n  %s-merge-windows.cmd "C:\\path-on-an-NTFS-or-exFAT-disk\\%s"\n\n' "$basename" "$basename"
+			printf 'Linux/macOS: run:\n  sh %s-merge-linux.sh /path-on-a-large-filesystem/%s\n\n' "$basename" "$basename"
+			printf 'Expected SHA-256: %s\n' "$hash"
+			printf 'After reassembly, write %s with Balena Etcher, Rufus or dd.\n' "$basename"
+		} > "$instructions_path" || {
+			JOB_ERROR="The image parts are complete, but the restore instructions could not be written"
+			state_write failed finalize 100 "$JOB_ERROR"
+			return 1
+		}
+	else
+		if ! mv "$partial" "$JOB_OUTPUT"; then
+			cleanup_created_files
+			JOB_ERROR="Unable to finalize the image file"
+			state_write failed finalize 0 "$JOB_ERROR"
+			return 1
+		fi
+		if ! printf '%s  %s\n' "$hash" "$basename" > "$checksum_path"; then
+			JOB_ERROR="The image is complete, but its checksum file could not be written"
+			JOB_SHA256="$hash"
+			state_write failed finalize 100 "$JOB_ERROR"
+			return 1
+		fi
+	fi
+
+	sync
+	JOB_WRITTEN_BYTES="$COPY_BYTES"
+	JOB_SHA256="$hash"
+	JOB_ETA_SECONDS="0"
+	state_write completed completed 100 "System image completed successfully"
+	return 0
+}
+
+case "${1:-}" in
+	probe)
+		probe_command
+		;;
+	status)
+		status_command
+		;;
+	start)
+		start_command "${2:-}" "${3:-auto}"
+		;;
+	cancel)
+		cancel_command
+		;;
+	run)
+		run_command "${2:-}" "${3:-auto}"
+		;;
+	*)
+		json_error "Unsupported command"
+		exit 1
+		;;
+esac

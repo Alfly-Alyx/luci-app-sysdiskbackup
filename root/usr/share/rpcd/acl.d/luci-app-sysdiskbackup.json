@@ -1,0 +1,15 @@
+{
+	"luci-app-sysdiskbackup": {
+		"description": "View system disk and USB backup destinations",
+		"read": {
+			"ubus": {
+				"luci.disk-backup": [ "probe", "status" ]
+			}
+		},
+		"write": {
+			"ubus": {
+				"luci.disk-backup": [ "start", "cancel" ]
+			}
+		}
+	}
+}
