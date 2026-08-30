@@ -86,7 +86,14 @@ Pour une sauvegarde découpée sur FAT32 sous Windows, copier le fichier
 un disque NTFS ou exFAT, puis double-cliquer sur le script. L’image `.img` est
 créée automatiquement dans ce dossier. Le script reste ouvert, vérifie la
 présence de toutes les parties, refuse d’écraser un fichier existant et affiche
-le SHA-256 à comparer.
+le SHA-256 à comparer. Il contrôle aussi le système de fichiers et l’espace libre
+avant de commencer ; sur FAT32, il demande de copier le script et les morceaux
+vers un dossier NTFS ou exFAT.
+
+Sur macOS, copier le fichier `*-merge-macos.command` et toutes les parties
+`*.partNNN` dans un même dossier APFS, HFS+ ou exFAT, puis double-cliquer sur le
+fichier `.command`. Le script bloque également FAT32 avant toute copie, crée
+l’image dans son propre dossier et vérifie automatiquement son SHA-256.
 
 Vérifier d’abord le fichier d’intégrité :
 

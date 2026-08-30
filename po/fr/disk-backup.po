@@ -193,6 +193,13 @@ msgstr "Sauvegarde FAT32 segmentée : %d morceaux. Réassemblez-les avant l’é
 msgid "Windows merge script:"
 msgstr "Script de réassemblage Windows :"
 
+msgid "Linux merge script:"
+msgstr "Script de réassemblage Linux :"
+
+msgid "macOS merge script:"
+msgstr "Script de réassemblage macOS :"
+
+# Kept for compatibility with cached LuCI views from earlier releases.
 msgid "Linux/macOS merge script:"
 msgstr "Script de réassemblage Linux/macOS :"
 
@@ -213,6 +220,9 @@ msgstr "Les morceaux de l’image sont terminés, mais le script de réassemblag
 
 msgid "The image parts are complete, but the Linux merge script could not be written"
 msgstr "Les morceaux de l’image sont terminés, mais le script de réassemblage Linux n’a pas pu être écrit"
+
+msgid "The image parts are complete, but the macOS merge script could not be written"
+msgstr "Les morceaux de l’image sont terminés, mais le script de réassemblage macOS n’a pas pu être écrit"
 
 msgid "The image parts are complete, but the restore instructions could not be written"
 msgstr "Les morceaux de l’image sont terminés, mais les instructions de restauration n’ont pas pu être écrites"

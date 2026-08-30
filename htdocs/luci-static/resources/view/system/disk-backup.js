@@ -407,7 +407,8 @@ return view.extend({
 			output.push(E('div', { 'class': 'alert-message warning' }, [
 				_('FAT32 split backup: %d parts. Reassemble them before flashing.').format(Number(status.part_count || 0)),
 				status.merge_windows ? E('div', {}, [ _('Windows merge script:'), ' ', status.merge_windows ]) : '',
-				status.merge_unix ? E('div', {}, [ _('Linux/macOS merge script:'), ' ', status.merge_unix ]) : ''
+				status.merge_unix ? E('div', {}, [ _('Linux merge script:'), ' ', status.merge_unix ]) : '',
+				status.merge_macos ? E('div', {}, [ _('macOS merge script:'), ' ', status.merge_macos ]) : ''
 			]));
 		if (status.sha256)
 			output.push(E('p', {}, [ E('strong', {}, [ _('SHA-256:') ]), ' ', E('code', {}, [ status.sha256 ]) ]));

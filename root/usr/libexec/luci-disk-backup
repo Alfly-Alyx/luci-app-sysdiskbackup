@@ -570,6 +570,7 @@ state_write() {
 	[ -n "${JOB_PART_COUNT:-}" ] && json_add_int part_count "$JOB_PART_COUNT"
 	[ -n "${JOB_MERGE_WINDOWS:-}" ] && json_add_string merge_windows "$JOB_MERGE_WINDOWS"
 	[ -n "${JOB_MERGE_UNIX:-}" ] && json_add_string merge_unix "$JOB_MERGE_UNIX"
+	[ -n "${JOB_MERGE_MACOS:-}" ] && json_add_string merge_macos "$JOB_MERGE_MACOS"
 	[ -n "${JOB_ERROR:-}" ] && json_add_string error "$JOB_ERROR"
 	[ -n "${JOB_ELAPSED_SECONDS:-}" ] && json_add_int elapsed_seconds "$JOB_ELAPSED_SECONDS"
 	[ -n "${JOB_ETA_SECONDS:-}" ] && json_add_int eta_seconds "$JOB_ETA_SECONDS"
@@ -672,6 +673,7 @@ start_command() {
 	JOB_PART_COUNT=""
 	JOB_MERGE_WINDOWS=""
 	JOB_MERGE_UNIX=""
+	JOB_MERGE_MACOS=""
 	JOB_ELAPSED_SECONDS="0"
 	JOB_ETA_SECONDS=""
 	JOB_WRITE_BPS=""
@@ -719,7 +721,7 @@ run_command() {
 	local part_index part_count part_suffix part_path part_final part_bytes part_full_blocks
 	local part_tail_bytes part_tail_sectors part_source_blocks part_source_sector part_seek_sector
 	local source_offset first_part last_part last_part_start current_size path name
-	local checksum_path cmd_path sh_path instructions_path first final_name
+	local checksum_path cmd_path sh_path mac_path instructions_path first final_name
 	local cancelled=0
 
 	JOB_SOURCE=""
@@ -734,6 +736,7 @@ run_command() {
 	JOB_PART_COUNT=""
 	JOB_MERGE_WINDOWS=""
 	JOB_MERGE_UNIX=""
+	JOB_MERGE_MACOS=""
 	JOB_STARTED_AT="$(date '+%s')"
 	JOB_ELAPSED_SECONDS="0"
 	JOB_ETA_SECONDS=""
@@ -864,10 +867,12 @@ run_command() {
 		JOB_OUTPUT="$DEST_MOUNT/$basename.part001"
 		cmd_path="$DEST_MOUNT/$basename-merge-windows.cmd"
 		sh_path="$DEST_MOUNT/$basename-merge-linux.sh"
+		mac_path="$DEST_MOUNT/$basename-merge-macos.command"
 		instructions_path="$DEST_MOUNT/$basename-RESTORE.txt"
 		JOB_MERGE_WINDOWS="$cmd_path"
 		JOB_MERGE_UNIX="$sh_path"
-		if [ -e "$DEST_MOUNT/$basename" ] || ! reserve_output "$checksum_path" || ! reserve_output "$cmd_path" || ! reserve_output "$sh_path" || ! reserve_output "$instructions_path"; then
+		JOB_MERGE_MACOS="$mac_path"
+		if [ -e "$DEST_MOUNT/$basename" ] || ! reserve_output "$checksum_path" || ! reserve_output "$cmd_path" || ! reserve_output "$sh_path" || ! reserve_output "$mac_path" || ! reserve_output "$instructions_path"; then
 			cleanup_created_files
 			JOB_ERROR="A backup file with the generated name already exists"
 			state_write failed prepare 0 "$JOB_ERROR"
@@ -1122,6 +1127,11 @@ run_command() {
 		{
 			printf '@echo off\r\nsetlocal EnableExtensions DisableDelayedExpansion\r\npushd "%%~dp0"\r\n'
 			printf 'title OpenWrt system image reassembly\r\necho.\r\necho OpenWrt system image reassembly\r\necho.\r\n'
+			printf 'set "REASSEMBLY_DIR=%%~dp0"\r\nset "FILESYSTEM="\r\nwhere powershell.exe >nul 2>&1\r\nif errorlevel 1 goto disk_check_done\r\n'
+			printf 'for /f "usebackq delims=" %%%%F in (`powershell.exe -NoProfile -NonInteractive -Command "$root=[System.IO.Path]::GetPathRoot($env:REASSEMBLY_DIR); $drive=New-Object System.IO.DriveInfo($root); $drive.DriveFormat" 2^>nul`) do set "FILESYSTEM=%%%%F"\r\n'
+			printf 'if /I "%%FILESYSTEM%%"=="FAT32" (\r\n  echo ERROR: This folder is on a FAT32 filesystem.\r\n  echo FAT32 cannot store the completed image because it is larger than 4 GiB.\r\n  echo Copy this script and every .partNNN file to the same folder on an NTFS or exFAT drive, then try again.\r\n  pause\r\n  exit /b 3\r\n)\r\n'
+			printf 'powershell.exe -NoProfile -NonInteractive -Command "try { $root=[System.IO.Path]::GetPathRoot($env:REASSEMBLY_DIR); $drive=New-Object System.IO.DriveInfo($root); if ([uint64]$drive.AvailableFreeSpace -lt [uint64]%s) { exit 1 }; exit 0 } catch { exit 0 }"\r\n' "$COPY_BYTES"
+			printf 'if errorlevel 1 (\r\n  echo ERROR: There is not enough free space to create the %s-byte image in this folder.\r\n  echo Copy this script and every .partNNN file to a drive with enough free space, then try again.\r\n  pause\r\n  exit /b 4\r\n)\r\n:disk_check_done\r\n' "$COPY_BYTES"
 			while IFS= read -r part_final; do
 				name="${part_final##*/}"
 				printf 'if not exist "%s" (\r\n  echo ERROR: Missing image part: %s\r\n  pause\r\n  exit /b 1\r\n)\r\n' "$name" "$name"
@@ -1152,23 +1162,43 @@ run_command() {
 		}
 
 		{
-			printf '#!/bin/sh\nset -eu\n[ "$#" -eq 1 ] || { echo "Usage: $0 OUTPUT.img"; exit 2; }\n[ ! -e "$1" ] || { echo "Refusing to overwrite $1"; exit 1; }\ncd "$(dirname "$0")"\ncat'
+			printf '#!/bin/sh\nset -eu\n[ "$#" -eq 1 ] || { echo "Usage: $0 OUTPUT.img"; exit 2; }\nOUTPUT="$1"\nOUTDIR="$(dirname "$OUTPUT")"\n[ -d "$OUTDIR" ] || { echo "The destination folder does not exist: $OUTDIR"; exit 1; }\nFS_TYPE=""\nif command -v findmnt >/dev/null 2>&1; then\n  FS_TYPE="$(findmnt -n -o FSTYPE -T "$OUTDIR" 2>/dev/null || true)"\nelif command -v stat >/dev/null 2>&1; then\n  FS_TYPE="$(stat -f -c "%%T" "$OUTDIR" 2>/dev/null || true)"\nfi\ncase "$(printf "%%s" "$FS_TYPE" | tr "[:upper:]" "[:lower:]")" in\n  vfat|msdos|fat|fat32)\n    echo "FAT32 cannot store the completed image because it is larger than 4 GiB." >&2\n    echo "Choose an output path on another filesystem and try again." >&2\n    exit 3\n    ;;\nesac\n[ ! -e "$OUTPUT" ] || { echo "Refusing to overwrite $OUTPUT"; exit 1; }\ncd "$(dirname "$0")"\ncat'
 			while IFS= read -r part_final; do
 				printf " '%s'" "${part_final##*/}"
 			done < "$final_list"
-			printf ' > "$1"\nprintf '\''%s  %%s\\n'\'' "$1" | sha256sum -c -\n' "$hash"
+			printf ' > "$OUTPUT"\nprintf '\''%s  %%s\\n'\'' "$OUTPUT" | sha256sum -c -\n' "$hash"
 		} > "$sh_path" || {
 			JOB_ERROR="The image parts are complete, but the Linux merge script could not be written"
 			state_write failed finalize 100 "$JOB_ERROR"
 			return 1
 		}
+		chmod 0755 "$sh_path" 2>/dev/null || true
+
+		{
+			printf '#!/bin/sh\nset -u\nSCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)" || exit 1\nOUTPUT="$SCRIPT_DIR/%s"\nEXPECTED_SHA256="%s"\npause_for_user() {\n  printf "\\nPress Return to close..."\n  IFS= read -r _answer || true\n}\nfail() {\n  printf "\\nERROR: %%s\\n" "$1" >&2\n  pause_for_user\n  exit "${2:-1}"\n}\nDISKUTIL="${SYSDISKBACKUP_DISKUTIL:-/usr/sbin/diskutil}"\nPLUTIL="${SYSDISKBACKUP_PLUTIL:-/usr/bin/plutil}"\nFS_TYPE=""\nif [ -x "$DISKUTIL" ] && [ -x "$PLUTIL" ]; then\n  FS_TYPE="$($DISKUTIL info -plist "$SCRIPT_DIR" 2>/dev/null | $PLUTIL -extract FilesystemType raw -o - - 2>/dev/null || true)"\nfi\ncase "$(printf "%%s" "$FS_TYPE" | tr "[:upper:]" "[:lower:]")" in\n  msdos|vfat|fat|fat16|fat32)\n    echo "ERROR: This folder is on a FAT32 filesystem." >&2\n    echo "FAT32 cannot store the completed image because it is larger than 4 GiB." >&2\n    echo "Copy this script and every .partNNN file to the same folder on an APFS, HFS+ or exFAT drive, then try again." >&2\n    pause_for_user\n    exit 3\n    ;;\nesac\n' "$basename" "$hash"
+			while IFS= read -r part_final; do
+				name="${part_final##*/}"
+				printf '[ -f "$SCRIPT_DIR/%s" ] || fail "Missing image part: %s"\n' "$name" "$name"
+			done < "$final_list"
+			printf '[ ! -e "$OUTPUT" ] || fail "Refusing to overwrite $OUTPUT"\nprintf "Creating %%s...\\n" "$OUTPUT"\ncat'
+			while IFS= read -r part_final; do
+				printf ' "$SCRIPT_DIR/%s"' "${part_final##*/}"
+			done < "$final_list"
+			printf ' > "$OUTPUT" || fail "The image could not be reassembled. A partial output file may remain at $OUTPUT"\nACTUAL_SHA256="$(shasum -a 256 "$OUTPUT" | sed "s/ .*//")" || fail "The SHA-256 checksum could not be calculated"\nprintf "SHA-256: %%s\\n" "$ACTUAL_SHA256"\n[ "$ACTUAL_SHA256" = "$EXPECTED_SHA256" ] || fail "SHA-256 mismatch. Expected $EXPECTED_SHA256"\necho "Image created and verified successfully."\necho "You can now write it with Balena Etcher, Raspberry Pi Imager or dd."\npause_for_user\nexit 0\n'
+		} > "$mac_path" || {
+			JOB_ERROR="The image parts are complete, but the macOS merge script could not be written"
+			state_write failed finalize 100 "$JOB_ERROR"
+			return 1
+		}
+		chmod 0755 "$mac_path" 2>/dev/null || true
 
 		{
 			printf 'FAT32 SPLIT RAW IMAGE\n\n'
 			printf 'The raw image is %s bytes and was split into %s parts because FAT32 cannot store files of 4 GiB or more.\n' "$COPY_BYTES" "$part_count"
 			printf 'No pre-existing file on the USB device was deleted or overwritten.\n\n'
-			printf 'Windows: copy this script and every %s.partNNN file into the same folder on an NTFS or exFAT drive, then double-click %s-merge-windows.cmd.\nThe completed %s file will be created in that folder. No existing file will be overwritten.\n\n' "$basename" "$basename" "$basename"
-			printf 'Linux/macOS: run:\n  sh %s-merge-linux.sh /path-on-a-large-filesystem/%s\n\n' "$basename" "$basename"
+			printf 'Windows: copy this script and every %s.partNNN file into the same folder on an NTFS or exFAT drive, then double-click %s-merge-windows.cmd.\nThe script checks the filesystem and free space before creating %s in that folder. No existing file will be overwritten.\n\n' "$basename" "$basename" "$basename"
+			printf 'macOS: copy %s-merge-macos.command and every %s.partNNN file into the same folder on an APFS, HFS+ or exFAT drive, then double-click the .command file.\nThe completed image will be created in that folder.\n\n' "$basename" "$basename"
+			printf 'Linux: run:\n  sh %s-merge-linux.sh /path-on-a-large-filesystem/%s\n\n' "$basename" "$basename"
 			printf 'Expected SHA-256: %s\n' "$hash"
 			printf 'After reassembly, write %s with Balena Etcher, Rufus or dd.\n' "$basename"
 		} > "$instructions_path" || {

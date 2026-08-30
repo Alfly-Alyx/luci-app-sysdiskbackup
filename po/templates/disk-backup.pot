@@ -127,7 +127,10 @@ msgstr ""
 msgid "Windows merge script:"
 msgstr ""
 
-msgid "Linux/macOS merge script:"
+msgid "Linux merge script:"
+msgstr ""
+
+msgid "macOS merge script:"
 msgstr ""
 
 msgid "The image would require too many FAT32 parts"
@@ -146,6 +149,9 @@ msgid "The image parts are complete, but the Windows merge script could not be w
 msgstr ""
 
 msgid "The image parts are complete, but the Linux merge script could not be written"
+msgstr ""
+
+msgid "The image parts are complete, but the macOS merge script could not be written"
 msgstr ""
 
 msgid "The image parts are complete, but the restore instructions could not be written"
