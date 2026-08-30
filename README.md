@@ -81,6 +81,13 @@ monté en lecture-écriture, par exemple depuis **Système → Points de montage
 
 ## Restauration
 
+Pour une sauvegarde découpée sur FAT32 sous Windows, copier le fichier
+`*-merge-windows.cmd` et toutes les parties `*.partNNN` dans un même dossier sur
+un disque NTFS ou exFAT, puis double-cliquer sur le script. L’image `.img` est
+créée automatiquement dans ce dossier. Le script reste ouvert, vérifie la
+présence de toutes les parties, refuse d’écraser un fichier existant et affiche
+le SHA-256 à comparer.
+
 Vérifier d’abord le fichier d’intégrité :
 
 ```sh

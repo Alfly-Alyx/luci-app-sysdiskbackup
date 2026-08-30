@@ -1120,9 +1120,15 @@ run_command() {
 		fi
 
 		{
-			printf '@echo off\r\nsetlocal\r\npushd "%%~dp0"\r\n'
-			printf 'if "%%~1"=="" (\r\n  echo Usage: %%~nx0 "C:\\\\path\\\\%s"\r\n  exit /b 2\r\n)\r\n' "$basename"
-			printf 'if exist "%%~1" (\r\n  echo Refusing to overwrite %%~1\r\n  exit /b 1\r\n)\r\n'
+			printf '@echo off\r\nsetlocal EnableExtensions DisableDelayedExpansion\r\npushd "%%~dp0"\r\n'
+			printf 'title OpenWrt system image reassembly\r\necho.\r\necho OpenWrt system image reassembly\r\necho.\r\n'
+			while IFS= read -r part_final; do
+				name="${part_final##*/}"
+				printf 'if not exist "%s" (\r\n  echo ERROR: Missing image part: %s\r\n  pause\r\n  exit /b 1\r\n)\r\n' "$name" "$name"
+			done < "$final_list"
+			printf 'set "OUTPUT=%%~dp0%s"\r\n' "$basename"
+			printf 'if exist "%%OUTPUT%%" (\r\n  echo ERROR: Refusing to overwrite "%%OUTPUT%%"\r\n  pause\r\n  exit /b 1\r\n)\r\n'
+			printf 'echo.\r\necho Creating "%%OUTPUT%%"...\r\n'
 			printf 'copy /b '
 			first=1
 			while IFS= read -r part_final; do
@@ -1134,8 +1140,11 @@ run_command() {
 					printf '+"%s"' "$name"
 				fi
 			done < "$final_list"
-			printf ' "%%~1"\r\nif errorlevel 1 exit /b 1\r\n'
-			printf 'certutil -hashfile "%%~1" SHA256\r\necho Expected SHA-256: %s\r\n' "$hash"
+			printf ' "%%OUTPUT%%"\r\n'
+			printf 'if errorlevel 1 (\r\n  echo.\r\n  echo ERROR: The image could not be reassembled.\r\n  echo A partial output file may remain at "%%OUTPUT%%".\r\n  pause\r\n  exit /b 1\r\n)\r\n'
+			printf 'echo.\r\necho Image created successfully.\r\necho Calculating SHA-256...\r\ncertutil -hashfile "%%OUTPUT%%" SHA256\r\n'
+			printf 'if errorlevel 1 (\r\n  echo WARNING: Windows could not calculate the SHA-256 checksum.\r\n) else (\r\n  echo Expected SHA-256: %s\r\n)\r\n' "$hash"
+			printf 'echo.\r\necho You can now write the image with Balena Etcher, Rufus or dd.\r\npause\r\npopd\r\nexit /b 0\r\n'
 		} > "$cmd_path" || {
 			JOB_ERROR="The image parts are complete, but the Windows merge script could not be written"
 			state_write failed finalize 100 "$JOB_ERROR"
@@ -1158,7 +1167,7 @@ run_command() {
 			printf 'FAT32 SPLIT RAW IMAGE\n\n'
 			printf 'The raw image is %s bytes and was split into %s parts because FAT32 cannot store files of 4 GiB or more.\n' "$COPY_BYTES" "$part_count"
 			printf 'No pre-existing file on the USB device was deleted or overwritten.\n\n'
-			printf 'Windows: open Command Prompt and run:\n  %s-merge-windows.cmd "C:\\path-on-an-NTFS-or-exFAT-disk\\%s"\n\n' "$basename" "$basename"
+			printf 'Windows: copy this script and every %s.partNNN file into the same folder on an NTFS or exFAT drive, then double-click %s-merge-windows.cmd.\nThe completed %s file will be created in that folder. No existing file will be overwritten.\n\n' "$basename" "$basename" "$basename"
 			printf 'Linux/macOS: run:\n  sh %s-merge-linux.sh /path-on-a-large-filesystem/%s\n\n' "$basename" "$basename"
 			printf 'Expected SHA-256: %s\n' "$hash"
 			printf 'After reassembly, write %s with Balena Etcher, Rufus or dd.\n' "$basename"
